@@ -1,6 +1,6 @@
 # =============================================================================
 #  DailyFileSync.ps1 - ROBUST Task Scheduler Version
-#  Finds files created/modified TODAY on Y:\ and logs to Google Sheets.
+#  Finds files created/modified since last sync on \\outside221\D and logs to Google Sheets.
 #  Built specifically for reliable Task Scheduler execution.
 #
 #  RELIABILITY FEATURES:
@@ -36,11 +36,15 @@ param(
 Set-StrictMode -Version 1
 $ErrorActionPreference = 'Continue'
 
-# FIX #1: $PSScriptRoot is always populated when run via -File; $MyInvocation.MyCommand.Definition is unreliable
+# FIX #1: Use $PSScriptRoot (always correct when run via -File from Task Scheduler)
 $ScriptDir = $PSScriptRoot
-if (-not $ScriptDir) { $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition }
-if (-not $ScriptDir) { $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
-if ($ScriptDir) { Set-Location $ScriptDir }
+if (-not $ScriptDir) {
+    # Fallback for interactive/ISE: use current directory
+    $ScriptDir = $PWD.Path
+}
+if ($ScriptDir -and (Test-Path $ScriptDir -ErrorAction SilentlyContinue)) {
+    Set-Location $ScriptDir
+}
 
 # =============================================================================
 #  CONFIGURATION
