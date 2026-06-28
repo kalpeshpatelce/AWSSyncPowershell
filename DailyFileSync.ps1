@@ -46,10 +46,7 @@ if ($ScriptDir) { Set-Location $ScriptDir }
 #  CONFIGURATION
 # =============================================================================
 $Config = @{
-    WatchPath         = 'Y:\'
     UNCPath           = '\\outside221\D'
-    DriveLetter       = 'Y'
-    NetworkPath       = '\\outside221\D'
     S3Bucket          = 'helps-emc-backup'
     S3Region          = 'ap-south-1'
     S3Prefix          = ''
@@ -223,59 +220,18 @@ function Wait-ForNetwork {
 }
 
 # =============================================================================
-#  NETWORK: Ensure drive access (UNC-first strategy for Task Scheduler)
+#  NETWORK: Ensure UNC path access with retries
 # =============================================================================
 function Ensure-NetworkAccess {
-    Write-Log "Ensuring network access..." -Level 'INFO'
-    $dl = $Config.DriveLetter
-    $np = $Config.NetworkPath
+    Write-Log "Checking UNC path: $($Config.UNCPath)" -Level 'INFO'
 
-    # Strategy 1: UNC direct (best for Task Scheduler - no drive mapping needed)
-    if (Test-Path $Config.UNCPath -ErrorAction SilentlyContinue) {
-        Write-Log "UNC path accessible: $($Config.UNCPath)" -Level 'OK'
-        return $Config.UNCPath
-    }
-
-    # Strategy 2: Check existing mapped drive
-    $dp = "$($dl):\"
-    if (Test-Path $dp -ErrorAction SilentlyContinue) {
-        try {
-            $null = Get-ChildItem $dp -ErrorAction Stop | Select-Object -First 1
-            Write-Log "Mapped drive $($dl): accessible" -Level 'OK'
-            return $dp
-        }
-        catch {
-            Write-Log "Drive $($dl): exists but unreadable: $($_.Exception.Message)" -Level 'WARN'
-        }
-    }
-
-    # Strategy 3: Map drive with retries
     for ($attempt = 1; $attempt -le $Config.MaxRetries; $attempt++) {
-        Write-Log "Drive map attempt $attempt/$($Config.MaxRetries)..." -Level 'INFO'
-        try { cmd /c "net use `"$($dl):`" /delete /y" 2>&1 | Out-Null } catch { }
-        Start-Sleep -Seconds 2
-
-        # FIX #5: Use cmd /c to preserve $LASTEXITCODE from net use
-        $mapResult = cmd /c "net use `"$($dl):`" `"$np`" /persistent:yes" 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Start-Sleep -Seconds 3
-            if (Test-Path $dp -ErrorAction SilentlyContinue) {
-                Write-Log "Drive $($dl): mapped on attempt $attempt" -Level 'OK'
-                return $dp
-            }
+        if (Test-Path $Config.UNCPath -ErrorAction SilentlyContinue) {
+            Write-Log "UNC path accessible: $($Config.UNCPath)" -Level 'OK'
+            return $Config.UNCPath
         }
 
-        $altPath = $np.TrimEnd('\')
-        $mapResult = cmd /c "net use `"$($dl):`" `"$altPath`" /persistent:yes" 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Start-Sleep -Seconds 3
-            if (Test-Path $dp -ErrorAction SilentlyContinue) {
-                Write-Log "Drive $($dl): mapped (alt) on attempt $attempt" -Level 'OK'
-                return $dp
-            }
-        }
-
-        Write-Log "Map failed (attempt $attempt): $mapResult" -Level 'WARN'
+        Write-Log "UNC not accessible (attempt $attempt/$($Config.MaxRetries))" -Level 'WARN'
         if ($attempt -lt $Config.MaxRetries) {
             $delay = $Config.RetryBaseDelaySec * $attempt
             Write-Log "Retrying in ${delay}s..." -Level 'WARN'
@@ -283,13 +239,7 @@ function Ensure-NetworkAccess {
         }
     }
 
-    # Final UNC check
-    if (Test-Path $Config.UNCPath -ErrorAction SilentlyContinue) {
-        Write-Log "Drive map failed but UNC now accessible" -Level 'WARN'
-        return $Config.UNCPath
-    }
-
-    Write-Log "ALL network access methods failed" -Level 'ERROR'
+    Write-Log "UNC path $($Config.UNCPath) not accessible after $($Config.MaxRetries) attempts" -Level 'ERROR'
     return $null
 }
 
@@ -521,7 +471,7 @@ function Invoke-DailyFileSync {
     # Step 2: Get accessible source path
     $sourcePath = Ensure-NetworkAccess
     if (-not $sourcePath) {
-        $errorMsg = "Cannot access $($Config.NetworkPath) or $($Config.WatchPath)"
+        $errorMsg = "Cannot access $($Config.UNCPath)"
         Write-Log $errorMsg -Level 'ERROR'
         Send-ToGoogleSheet -Timestamp (Get-Timestamp) -Status 'ERROR' -TotalSize '0 MB' -FileCount 0 -Message 'Daily sync failed - Network failed' -Details $errorMsg -Errors $errorMsg
         return $false
