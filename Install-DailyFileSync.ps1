@@ -66,6 +66,29 @@ else {
 }
 
 # =============================================================================
+#  STEP 3b: Copy AWS credentials to SYSTEM profile (Task Scheduler runs as SYSTEM)
+# =============================================================================
+Write-Host "[3b/5] Setting up AWS credentials for SYSTEM account" -ForegroundColor Yellow
+$userAwsDir = "$env:USERPROFILE\.aws"
+$systemAwsDir = 'C:\Windows\System32\config\systemprofile\.aws'
+
+if (Test-Path "$userAwsDir\credentials") {
+    if (-not (Test-Path $systemAwsDir)) {
+        New-Item -ItemType Directory -Path $systemAwsDir -Force | Out-Null
+    }
+    Copy-Item -Path "$userAwsDir\credentials" -Destination "$systemAwsDir\credentials" -Force
+    Write-Host "      Copied credentials to SYSTEM profile" -ForegroundColor Green
+    if (Test-Path "$userAwsDir\config") {
+        Copy-Item -Path "$userAwsDir\config" -Destination "$systemAwsDir\config" -Force
+        Write-Host "      Copied config to SYSTEM profile" -ForegroundColor Green
+    }
+}
+else {
+    Write-Host "      WARN: No AWS credentials found at $userAwsDir" -ForegroundColor Yellow
+    Write-Host "      Run 'aws configure' first, then re-run this installer" -ForegroundColor Yellow
+}
+
+# =============================================================================
 #  STEP 4: Create Scheduled Task
 # =============================================================================
 Write-Host "[4/5] Creating scheduled task: $taskName" -ForegroundColor Yellow

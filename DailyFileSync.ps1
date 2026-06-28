@@ -129,15 +129,9 @@ function Write-Log {
     }
     Write-Host $line -ForegroundColor $color
     try {
-        Add-Content -Path $Config.LocalLogFile -Value $line -Encoding UTF8 -ErrorAction Stop
+        Add-Content -Path $Config.LocalLogFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
     }
-    catch {
-        # Fallback: event log
-        try {
-            Write-EventLog -LogName Application -Source 'DailyFileSync' -EventId 1000 -EntryType Warning -Message $line -ErrorAction SilentlyContinue
-        }
-        catch { }
-    }
+    catch { }
 }
 
 function Format-FileSize {
@@ -334,16 +328,22 @@ function Test-AWSCLI {
 }
 
 function Test-AWSCredentials {
-    if ($env:AWS_ACCESS_KEY_ID -and $env:AWS_SECRET_ACCESS_KEY) {
-        Write-Log "AWS env credentials found" -Level 'INFO'
-        return $true
+    # Just verify aws s3 ls works and bucket is accessible
+    try {
+        $result = & $script:AWSCliPath s3 ls "s3://$($Config.S3Bucket)/" --region $Config.S3Region 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "AWS S3 bucket accessible: $($Config.S3Bucket)" -Level 'OK'
+            return $true
+        }
+        else {
+            Write-Log "AWS S3 bucket not accessible: $($result -join ' ')" -Level 'ERROR'
+            return $false
+        }
     }
-    if (Test-Path "$env:USERPROFILE\.aws\credentials") {
-        Write-Log "AWS credentials found (aws configure)" -Level 'INFO'
-        return $true
+    catch {
+        Write-Log "AWS check failed: $($_.Exception.Message)" -Level 'ERROR'
+        return $false
     }
-    Write-Log "AWS credentials not found" -Level 'ERROR'
-    return $false
 }
 
 # Upload today's modified files to S3 (preserves folder structure)
@@ -393,17 +393,20 @@ function Upload-FilesToS3 {
             $result = & $script:AWSCliPath $cpArgs 2>&1
             if ($LASTEXITCODE -eq 0) {
                 $successCount++
+                Write-Log "Uploaded: $($file.Name) -> s3://$Bucket/$s3Key" -Level 'OK'
             }
             else {
                 $failedCount++
-                $errText = "$($file.Name): $result"
+                $errText = "$($file.Name): $($result -join ' ')"
                 $errorMessages += $errText
-                Write-Log "S3 upload failed: $errText" -Level 'WARN'
+                Write-Log "S3 upload FAILED: $errText" -Level 'ERROR'
             }
         }
         catch {
             $failedCount++
-            $errorMessages += "$($file.Name): $($_.Exception.Message)"
+            $errText = "$($file.Name): $($_.Exception.Message)"
+            $errorMessages += $errText
+            Write-Log "S3 upload exception: $errText" -Level 'ERROR'
         }
 
         # Log progress every 20 files
