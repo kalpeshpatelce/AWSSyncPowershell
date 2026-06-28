@@ -654,9 +654,8 @@ function Register-DailySyncTask {
 
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
 
-    # FIX #11: Use SYSTEM + ServiceAccount (most reliable, no password needed, runs without logon)
-    # Note: SYSTEM cannot access mapped drives - but script uses UNC path as primary strategy
-    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    # Run as current user (NOT SYSTEM) — so AWS credentials from 'aws configure' work
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Highest
 
     try {
         Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "Daily file sync - robust version with network wait and retry" -Force
@@ -736,4 +735,13 @@ finally {
     catch { }
 }
 
-exit $exitCode
+# Only exit when running non-interactively (Task Scheduler / cmd line)
+# In ISE, exit closes the entire session
+$isISE = ($Host.Name -eq 'Windows PowerShell ISE Host') -or ($Host.Name -eq 'Visual Studio Code Host')
+if (-not $isISE) {
+    exit $exitCode
+}
+else {
+    Write-Host ""
+    Write-Host "Script finished. Exit code: $exitCode (0=success, 1=failure, 2=crash)" -ForegroundColor Cyan
+}

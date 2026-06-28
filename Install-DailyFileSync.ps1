@@ -123,10 +123,10 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartCount 3 `
     -RestartInterval (New-TimeSpan -Minutes 5)
 
-# Principal: Run whether user is logged on or not, highest privileges
+# Principal: Run as current user with highest privileges (so AWS credentials work)
 $principal = New-ScheduledTaskPrincipal `
-    -UserId 'SYSTEM' `
-    -LogonType ServiceAccount `
+    -UserId "$env:USERDOMAIN\$env:USERNAME" `
+    -LogonType S4U `
     -RunLevel Highest
 
 # Register the task
@@ -141,7 +141,7 @@ Register-ScheduledTask `
 
 Write-Host "      Task created: $taskName" -ForegroundColor Green
 Write-Host "      Schedule: Daily at 5:00 PM, repeat every 30 min" -ForegroundColor Green
-Write-Host "      Run as: SYSTEM (highest privileges, logon not required)" -ForegroundColor Green
+Write-Host "      Run as: $env:USERDOMAIN\$env:USERNAME (highest privileges, S4U logon)" -ForegroundColor Green
 Write-Host "      Restart on fail: 3 times, 5 min apart" -ForegroundColor Green
 Write-Host "      Start if missed: Yes" -ForegroundColor Green
 
