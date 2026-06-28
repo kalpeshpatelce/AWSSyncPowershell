@@ -50,7 +50,7 @@ if ($ScriptDir -and (Test-Path $ScriptDir -ErrorAction SilentlyContinue)) {
 #  CONFIGURATION
 # =============================================================================
 $Config = @{
-    UNCPath           = '\\outside221\D'
+    UNCPath           = 'C:\AWSs3Test'
     S3Bucket          = 'helps-emc-backup'
     S3Region          = 'ap-south-1'
     S3Prefix          = ''
@@ -65,7 +65,7 @@ $Config = @{
     NetworkWaitPollSec = 5
     StartupDelaySec   = 15
     TaskName          = 'DailyFileSync_5PM'
-    TaskRunTime       = '17:00'
+    TaskRunTime       = '17:15'
     EsExePath         = 'C:\Program Files\Everything\es.exe'
     # Last sync timestamp file — tracks when we last successfully synced
     # so no files created after 5 PM are ever missed
