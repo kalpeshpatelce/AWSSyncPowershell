@@ -50,7 +50,7 @@ if ($ScriptDir -and (Test-Path $ScriptDir -ErrorAction SilentlyContinue)) {
 #  CONFIGURATION
 # =============================================================================
 $Config = @{
-    UNCPath           = 'C:\AWSs3Test'
+    UNCPath           = '\\localhost\s3syncdir'
     S3Bucket          = 'helps-emc-backup'
     S3Region          = 'ap-south-1'
     S3Prefix          = ''
@@ -321,6 +321,9 @@ function Test-AWSCLI {
     $awsCmd = Get-Command aws -ErrorAction SilentlyContinue
     if ($awsCmd) {
         $script:AWSCliPath = $awsCmd.Source
+        # Fix AWS CLI v2 "Bad file descriptor" error in non-interactive mode
+        $env:AWS_PAGER = ''
+        $env:PYTHONIOENCODING = 'utf-8'
         return $true
     }
     Write-Log "AWS CLI not found in PATH" -Level 'ERROR'
@@ -328,15 +331,22 @@ function Test-AWSCLI {
 }
 
 function Test-AWSCredentials {
-    # Just verify aws s3 ls works and bucket is accessible
+    # Verify aws s3 ls works and bucket is accessible
     try {
-        $result = & $script:AWSCliPath s3 ls "s3://$($Config.S3Bucket)/" --region $Config.S3Region 2>&1
-        if ($LASTEXITCODE -eq 0) {
+        $tmpOut = Join-Path $env:TEMP 'aws_test_ls.tmp'
+        $tmpErr = Join-Path $env:TEMP 'aws_test_ls_err.tmp'
+        $proc = Start-Process -FilePath $script:AWSCliPath -ArgumentList @('s3', 'ls', "s3://$($Config.S3Bucket)/", '--region', $Config.S3Region) -Wait -NoNewWindow -PassThru -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+        if ($proc.ExitCode -eq 0) {
             Write-Log "AWS S3 bucket accessible: $($Config.S3Bucket)" -Level 'OK'
+            if (Test-Path $tmpOut) { Remove-Item $tmpOut -Force -ErrorAction SilentlyContinue }
+            if (Test-Path $tmpErr) { Remove-Item $tmpErr -Force -ErrorAction SilentlyContinue }
             return $true
         }
         else {
-            Write-Log "AWS S3 bucket not accessible: $($result -join ' ')" -Level 'ERROR'
+            $errMsg = if (Test-Path $tmpErr) { Get-Content $tmpErr -Raw } else { "Exit code $($proc.ExitCode)" }
+            Write-Log "AWS S3 bucket not accessible: $errMsg" -Level 'ERROR'
+            if (Test-Path $tmpOut) { Remove-Item $tmpOut -Force -ErrorAction SilentlyContinue }
+            if (Test-Path $tmpErr) { Remove-Item $tmpErr -Force -ErrorAction SilentlyContinue }
             return $false
         }
     }
@@ -358,70 +368,119 @@ function Upload-FilesToS3 {
 
     Write-Log "Uploading $($Files.Count) files to S3..." -Level 'INFO'
 
-    if (-not (Test-AWSCLI)) { return @{ Success = 0; Failed = 0; Errors = 'AWS CLI not found' } }
-    if (-not (Test-AWSCredentials)) { return @{ Success = 0; Failed = 0; Errors = 'AWS credentials not found' } }
+    # Import AWS module
+    try {
+        Import-Module AWS.Tools.S3 -ErrorAction Stop
+        Set-DefaultAWSRegion -Region $Region -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Log "AWS.Tools.S3 module not found. Falling back to AWS CLI." -Level 'WARN'
+        return (Upload-FilesToS3-CLI -Files $Files -SourceRoot $SourceRoot -Bucket $Bucket -Prefix $Prefix -Region $Region)
+    }
 
     $successCount = 0
     $failedCount = 0
     $errorMessages = @()
 
     # Normalize source root for path calculation
-    $sourceRootNorm = $SourceRoot.TrimEnd('\')
+    $sourceRootNorm = $SourceRoot.TrimEnd('\').TrimEnd('/')
 
     foreach ($file in $Files) {
         $filePath = if ($file.Path) { $file.Path } elseif ($file.FullName) { $file.FullName } else { continue }
+        $filePath = $filePath -replace '^Microsoft\.PowerShell\.Core\\FileSystem::', ''
 
-        # Skip if file doesn't exist (may have been deleted since scan)
         if (-not (Test-Path $filePath -ErrorAction SilentlyContinue)) {
             Write-Log "Skip (not found): $filePath" -Level 'WARN'
             $failedCount++
             continue
         }
 
-        # Calculate S3 key preserving folder structure
+        # Calculate S3 key — preserves folder structure
         $relativePath = $filePath
-        if ($filePath.StartsWith($sourceRootNorm, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $relativePath = $filePath.Substring($sourceRootNorm.Length).TrimStart('\')
+        if ($filePath.ToLower().StartsWith($sourceRootNorm.ToLower())) {
+            $relativePath = $filePath.Substring($sourceRootNorm.Length).TrimStart('\').TrimStart('/')
         }
         $s3Key = "$Prefix$($relativePath -replace '\\', '/')"
 
-        # Upload single file
-        $cpArgs = @('s3', 'cp', $filePath, "s3://$Bucket/$s3Key", '--region', $Region, '--no-progress')
-        if ($Config.AWSProfile -ne 'default') { $cpArgs += '--profile', $Config.AWSProfile }
-
         try {
-            $result = & $script:AWSCliPath $cpArgs 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                $successCount++
-                Write-Log "Uploaded: $filePath -> s3://$Bucket/$s3Key" -Level 'OK'
-            }
-            else {
-                $failedCount++
-                $errText = "$($file.Name): $($result -join ' ')"
-                $errorMessages += $errText
-                Write-Log "S3 upload FAILED: $errText" -Level 'ERROR'
-            }
+            Write-S3Object -BucketName $Bucket -Key $s3Key -File $filePath -Region $Region -ErrorAction Stop
+            $successCount++
+            Write-Log "Uploaded: $filePath -> s3://$Bucket/$s3Key" -Level 'OK'
         }
         catch {
             $failedCount++
             $errText = "$($file.Name): $($_.Exception.Message)"
             $errorMessages += $errText
-            Write-Log "S3 upload exception: $errText" -Level 'ERROR'
+            Write-Log "S3 upload FAILED: $errText" -Level 'ERROR'
         }
 
-        # Log progress every 20 files
         if (($successCount + $failedCount) % 20 -eq 0) {
             Write-Log "S3 progress: $successCount uploaded, $failedCount failed / $($Files.Count) total" -Level 'INFO'
         }
     }
 
     Write-Log "S3 upload done: $successCount success, $failedCount failed out of $($Files.Count)" -Level $(if ($failedCount -eq 0) { 'OK' } else { 'WARN' })
+    return @{ Success = $successCount; Failed = $failedCount; Errors = ($errorMessages | Select-Object -First 3) -join '; ' }
+}
 
-    return @{
-        Success = $successCount
-        Failed  = $failedCount
-        Errors  = ($errorMessages | Select-Object -First 3) -join '; '
+# Fallback: Upload using AWS CLI (if AWS.Tools.S3 not available)
+function Upload-FilesToS3-CLI {
+    param(
+        [array]$Files,
+        [string]$SourceRoot,
+        [string]$Bucket,
+        [string]$Prefix,
+        [string]$Region
+    )
+
+    if (-not (Test-AWSCLI)) { return @{ Success = 0; Failed = 0; Errors = 'AWS CLI not found' } }
+    if (-not (Test-AWSCredentials)) { return @{ Success = 0; Failed = 0; Errors = 'AWS S3 bucket not accessible' } }
+
+    $successCount = 0
+    $failedCount = 0
+    $errorMessages = @()
+    $sourceRootNorm = $SourceRoot.TrimEnd('\').TrimEnd('/')
+
+    foreach ($file in $Files) {
+        $filePath = if ($file.Path) { $file.Path } elseif ($file.FullName) { $file.FullName } else { continue }
+        $filePath = $filePath -replace '^Microsoft\.PowerShell\.Core\\FileSystem::', ''
+
+        if (-not (Test-Path $filePath -ErrorAction SilentlyContinue)) {
+            $failedCount++
+            continue
+        }
+
+        $relativePath = $filePath
+        if ($filePath.ToLower().StartsWith($sourceRootNorm.ToLower())) {
+            $relativePath = $filePath.Substring($sourceRootNorm.Length).TrimStart('\').TrimStart('/')
+        }
+        $s3Key = "$Prefix$($relativePath -replace '\\', '/')"
+
+        $cpArgs = @('s3', 'cp', "`"$filePath`"", "`"s3://$Bucket/$s3Key`"", '--region', $Region, '--no-progress')
+        if ($Config.AWSProfile -ne 'default') { $cpArgs += '--profile', $Config.AWSProfile }
+
+        try {
+            $tmpErr = Join-Path $env:TEMP "aws_err_$([guid]::NewGuid().ToString('N').Substring(0,8)).tmp"
+            $proc = Start-Process -FilePath $script:AWSCliPath -ArgumentList $cpArgs -Wait -NoNewWindow -PassThru -RedirectStandardError $tmpErr
+            if ($proc.ExitCode -eq 0) {
+                $successCount++
+                Write-Log "Uploaded: $filePath -> s3://$Bucket/$s3Key" -Level 'OK'
+            }
+            else {
+                $failedCount++
+                $errText = if (Test-Path $tmpErr) { "$($file.Name): $(Get-Content $tmpErr -Raw)" } else { "$($file.Name): Exit $($proc.ExitCode)" }
+                $errorMessages += $errText
+                Write-Log "S3 upload FAILED: $errText" -Level 'ERROR'
+            }
+            if (Test-Path $tmpErr) { Remove-Item $tmpErr -Force -ErrorAction SilentlyContinue }
+        }
+        catch {
+            $failedCount++
+            $errorMessages += "$($file.Name): $($_.Exception.Message)"
+        }
     }
+
+    return @{ Success = $successCount; Failed = $failedCount; Errors = ($errorMessages | Select-Object -First 3) -join '; ' }
 }
 
 function Sync-ToS3 {
