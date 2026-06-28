@@ -393,7 +393,7 @@ function Upload-FilesToS3 {
             $result = & $script:AWSCliPath $cpArgs 2>&1
             if ($LASTEXITCODE -eq 0) {
                 $successCount++
-                Write-Log "Uploaded: $($file.Name) -> s3://$Bucket/$s3Key" -Level 'OK'
+                Write-Log "Uploaded: $filePath -> s3://$Bucket/$s3Key" -Level 'OK'
             }
             else {
                 $failedCount++
